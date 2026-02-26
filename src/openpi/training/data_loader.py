@@ -146,7 +146,10 @@ def create_torch_dataset(
     )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        # Convert tasks DataFrame to dict: {task_index: prompt}
+        # tasks DataFrame structure: index=prompt, column=task_index
+        tasks_dict = {row['task_index']: idx for idx, row in dataset_meta.tasks.iterrows()}
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(tasks_dict)])
 
     return dataset
 

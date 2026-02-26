@@ -24,6 +24,8 @@ import openpi.policies.libero2_policy as libero2_policy
 import openpi.policies.labsim_policy as labsim_policy
 import openpi.policies.spacemouse_policy as spacemouse_policy
 import openpi.policies.gello_policy as gello_policy
+import openpi.policies.leju_policy as leju_policy
+import openpi.policies.fastumidata_policy as fastumidata_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -438,6 +440,46 @@ class LeRobotSpaceMouseDataConfig(DataConfigFactory):
         )
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotFbhDataConfig(DataConfigFactory):
+    """
+    Config for training on FBH dataset in LeRobot format.
+    Dataset columns: observation.images.image, observation.images.wrist_image, observation.state, action
+    Uses LiberoInputs since dataset only has 2 cameras (GelloInputs expects 3).
+    """
+
+    default_prompt: str | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.image",
+                        "observation/wrist_image": "observation.images.wrist_image",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+
+        # Use LiberoInputs since dataset only has 2 cameras (GelloInputs expects 3)
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotGelloDataConfig(DataConfigFactory):
     """
     Config for training on Gello dataset in LeRobot format.
@@ -472,6 +514,87 @@ class LeRobotGelloDataConfig(DataConfigFactory):
         )
 
         # Model transforms - standard for all models
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLejuDataConfig(DataConfigFactory):
+    """
+    Config for training on Leju dataset in LeRobot format.
+    Leju dataset uses delta actions (relative joint movements), similar to Libero.
+    """
+
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transform to map dataset keys to expected keys
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.head_cam_h",
+                        "observation/wrist_image": "observation.images.wrist_cam_l",
+                        "observation/right_wrist_image": "observation.images.wrist_cam_r",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+
+        # Data transforms for SpaceMouse
+        # Note: SpaceMouse actions are already delta actions, so no additional delta transform needed
+        data_transforms = _transforms.Group(
+            inputs=[leju_policy.LejuInputs(model_type=model_config.model_type)],
+            outputs=[leju_policy.LejuOutputs()],
+        )
+
+        # Model transforms - standard for all models
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class FastUmiDataConfig(DataConfigFactory):
+    """
+    Config for training on FastUmi dataset in LeRobot format.
+    Uses absolute actions (not delta actions).
+    """
+
+    default_prompt: str | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/state": "observation.state",
+                        "observation/images/robot_0": "observation.images.robot_0",
+                        "actions": "actions",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[fastumidata_policy.FastUmiDataInputs(action_dim=model_config.action_dim, model_type=model_config.model_type)],
+            outputs=[fastumidata_policy.FastUmiDataOutputs()],
+        )
+
         model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
 
         return dataclasses.replace(
@@ -673,7 +796,7 @@ class TrainConfig:
     batch_size: int = 32
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
-    num_workers: int = 2
+    num_workers: int = 8
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
 
@@ -1166,6 +1289,9 @@ _CONFIGS = [
         exp_name="debug_pi05",
         wandb_enabled=False,
     ),
+    # RoboArena & PolaRiS configs.
+    *roboarena_config.get_roboarena_configs(),
+    *polaris_config.get_polaris_configs(),
     TrainConfig(
         name="pi0_level3_HeatLiquid",
         model=pi0_config.Pi0Config(action_horizon=60),  # Updated to match your dataset
@@ -1257,6 +1383,42 @@ _CONFIGS = [
         save_interval=1000,
         keep_period=10000
     ),
+    # leju
+    TrainConfig(
+        name="pi05_leju_demo",
+        model=pi0_config.Pi0Config(action_horizon=60, pi05=True),
+        data=LeRobotLejuDataConfig(
+            repo_id="TASK1-ToySorting_1000_w640_h480/lerobot",
+            default_prompt="pick up the toy and place it in the bin",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("action",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        save_interval=2000,
+        keep_period=10_000,
+    ),
+    TrainConfig(
+        name="pi05_leju_task2",
+        model=pi0_config.Pi0Config(action_horizon=60, pi05=True),
+        data=LeRobotLejuDataConfig(
+            repo_id="TASK2-ParcelWeighing_1000_w640_h480/lerobot",
+            default_prompt="weigh the parcel and place it in the bin",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("action",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        save_interval=2000,
+        keep_period=10_000,
+        num_workers=16
+    ),
     #
     # SpaceMouse configs.
     #
@@ -1302,7 +1464,7 @@ _CONFIGS = [
             repo_id="real_franka/pick_place_cup1215",
             default_prompt="pick up the cup and place it on the platform",
             base_config=DataConfig(
-                prompt_from_task=False,
+                prompt_from_task=False,   
                 action_sequence_keys=("actions",)
             ),
         ),
@@ -1329,9 +1491,414 @@ _CONFIGS = [
         save_interval=2000,
         keep_period=10_000,
     ), 
-    # RoboArena & PolaRiS configs.
-    *roboarena_config.get_roboarena_configs(),
-    *polaris_config.get_polaris_configs(),
+    TrainConfig(
+        name="pi0_gello_franka_zdz_pick_banana_1219",
+        model=pi0_config.Pi0Config(action_horizon=30),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/zdz_pick_banana_1219",
+            default_prompt="pick up the banana and place it in the basket",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        save_interval=2000,
+        keep_period=10_000,
+    ), 
+    TrainConfig(
+        name="zzr_pick_place_banana_12_23",
+        model=pi0_config.Pi0Config(action_horizon=30),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/zzr/lerobot_zzr_pick_place_banana_12_23",
+            default_prompt="pick up the banana and place it in the plate",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        save_interval=2000,
+        keep_period=10_000,
+    ), 
+    TrainConfig(
+        name="pmt_two_action",
+        model=pi0_config.Pi0Config(action_horizon=30, pi05=True),
+        data=LeRobotSpaceMouseDataConfig(
+            repo_id="real_franka/pick_place_cup1215",
+            default_prompt="pick up the cup and place it on the platform",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        save_interval=2000,
+        keep_period=10_000,
+    ),
+
+    TrainConfig(
+        name="lcx_pi05_demo",  
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40), 
+        data=LeRobotGelloDataConfig(  
+            repo_id="real_franka/protocol_dataset", 
+            default_prompt="Complete the chemistry experiment: first place the round-bottom flask on the heating plate, then insert the glass stopper into the flask",  
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # 训练步数和学习率配置
+        num_train_steps=30_000,  # 修改为 30,000 步
+        batch_size=64*4,  # 4 GPU × 64 = 256
+        # 学习率退火策略
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,      # 预热步数
+            peak_lr=5e-5,            # 峰值学习率
+            decay_steps=30_000,      # 衰减总步数
+            decay_lr=1e-6,           # 最终学习率
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # Checkpoint 保存配置（优化：减少保存频率以避免磁盘空间不足）
+        save_interval=5000,          # 每 5000 步保存一次（原 1000）
+        keep_period=10000,           # 每 10000 步保留一个永久 checkpoint（原 5000）
+        # Checkpoint 目录配置
+        checkpoint_base_dir="/mnt/shared-storage-user/labutopia-shared/checkpoints",
+    ),
+
+    TrainConfig(
+        name="lcx_pi0_demo",  
+        model=pi0_config.Pi0Config(action_horizon=30),  # Pi0: action_horizon=30
+        data=LeRobotGelloDataConfig(  
+            repo_id="real_franka/protocol_dataset", 
+            default_prompt="Complete the chemistry experiment: first place the round-bottom flask on the heating plate, then insert the glass stopper into the flask",  
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),  # 使用 pi0_base
+        # 训练步数和学习率配置
+        num_train_steps=30_000,  
+        batch_size=64*4,  # 4 GPU × 64 = 256
+        # 学习率退火策略
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,      # 预热步数
+            peak_lr=5e-5,            # 峰值学习率
+            decay_steps=30_000,      # 衰减总步数
+            decay_lr=1e-6,           # 最终学习率
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        # Checkpoint 保存配置（优化：减少保存频率以避免磁盘空间不足）
+        save_interval=5000,          # 每 5000 步保存一次（原 1000）
+        keep_period=10000,           # 每 10000 步保留一个永久 checkpoint（原 5000）
+        # Checkpoint 目录配置
+        checkpoint_base_dir="/mnt/shared-storage-user/labutopia-shared/checkpoints",
+    ),
+
+    TrainConfig(
+        name="lcx_pi0_split_demo",
+        model=pi0_config.Pi0Config(action_horizon=30),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/protocol_split_dataset",
+            default_prompt="hello",
+            base_config=DataConfig(
+                prompt_from_task=True,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=5000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+
+    TrainConfig(
+        name="lcx_pi05_split_demo",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/protocol_split_dataset",
+            default_prompt="insert the glass stopper into the flask",
+            base_config=DataConfig(
+                prompt_from_task=True,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=5000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+    TrainConfig(
+        name="lcx_pi05_insert_stopper_01",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/new_pick_stopper",  # 默认数据集，可通过命令行参数覆盖
+            default_prompt="hello",
+            base_config=DataConfig(
+                prompt_from_task=True,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*8,  # 8 GPU × 64 = 512 (适配 8 卡训练)
+        num_workers=4,  # 增加数据加载 workers 以提升训练速度
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=5000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+    TrainConfig(
+        name="pi05_insert_stopper",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/pick_up_stopper_114",  # 默认数据集，可通过命令行参数覆盖
+            default_prompt="hello",
+            base_config=DataConfig(
+                prompt_from_task=True,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32*4,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+    TrainConfig(
+        name="pi05_droid_insert_stopper",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/pick_up_stopper_114",  # 默认数据集，可通过命令行参数覆盖
+            default_prompt="hello",
+            base_config=DataConfig(
+                prompt_from_task=True,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_droid/params"),
+        num_train_steps=30_000,
+        batch_size=32*2,
+        num_workers=4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+    TrainConfig(
+        name="pi05_push_button",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/new_push_button",  # 默认数据集，可通过命令行参数覆盖
+            default_prompt="push the button",
+            base_config=DataConfig(
+                prompt_from_task=False,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32*4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+    #fbh_object
+    TrainConfig(
+        name="pi05_fbh_object",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotFbhDataConfig(
+            repo_id="fbh/libero_object_no_noops_1.0.0_lerobot",
+            default_prompt="pick up the object and place it on the platform",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("action",)  # 数据集中的列名是 "action"
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=64*4,
+        save_interval=2000,
+        keep_period=10_000,
+    ),
+    TrainConfig(
+        name="pi05_pick_bottle",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/new_pick_bottle",  # 默认数据集，可通过命令行参数覆盖
+            default_prompt="pick the bottle",
+            base_config=DataConfig(
+                prompt_from_task=False,  # 从数据集读取不同的 prompt
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32*4,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        save_interval=1000,
+        keep_period=10000,
+        checkpoint_base_dir="/mnt/shared-storage-gpfs2/labutopia-shared/check_points",
+    ),
+    TrainConfig(
+        name="pi05_fastumi_single_arm",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=FastUmiDataConfig(
+            repo_id="fastumidata/newtask",
+            default_prompt="complete the task",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("action",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="demo_pi05_pour_water",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/pour_water_final",
+            default_prompt="Pick up the graduated cylinder and pour water into the bottle",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="demo_pi05_pick_up_funnel",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/pick_up_funnel_final",
+            default_prompt="Pick the funnel and place it in the bottle",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="demo_pi05_pick_bottle",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/pick_bottle_final",
+            default_prompt="Pick the bottle and place it on the heating plate",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="demo_pi05_push_botton",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/push_botton_final",
+            default_prompt="push the button on the heating plate",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
+    TrainConfig(
+        name="demo_pi05_pick_stopper",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=40),
+        data=LeRobotGelloDataConfig(
+            repo_id="real_franka/pick_stopper_final",
+            default_prompt="pick the stopper and place it in the flask",
+            base_config=DataConfig(
+                prompt_from_task=False,
+                action_sequence_keys=("actions",)
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        batch_size=32,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
