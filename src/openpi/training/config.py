@@ -1388,7 +1388,7 @@ _CONFIGS = [
         name="pi05_leju_demo",
         model=pi0_config.Pi0Config(action_horizon=60, pi05=True),
         data=LeRobotLejuDataConfig(
-            repo_id="TASK1-ToySorting_1000_w640_h480/lerobot",
+            repo_id="TASK2-ParcelWeighing_1000_w640_h480/lerobot",
             default_prompt="pick up the toy and place it in the bin",
             base_config=DataConfig(
                 prompt_from_task=False,
